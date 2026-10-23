@@ -1,9 +1,9 @@
-name: Build MobileGestalt Probe IPA
+name: Build Experimental Diagnostics IPA
 
 on:
   workflow_dispatch:
   push:
-    branches: [mobilegestalt-probe]
+    branches: [mobilegestalt-probe, airtraffic-diagnostics]
 
 permissions:
   contents: read
@@ -31,7 +31,9 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
       - name: Test Rust diagnostics
-        run: cargo test --locked --manifest-path rust-core/Cargo.toml --lib mobilegestalt_probe
+        run: |
+          cargo test --locked --manifest-path rust-core/Cargo.toml --lib mobilegestalt_probe
+          cargo test --locked --manifest-path rust-core/Cargo.toml --lib airtraffic_diagnostics
       - name: Rebuild AirliftFFI from source
         run: bash build-ios.sh
       - name: Generate Xcode project
@@ -44,12 +46,13 @@ jobs:
           xcodebuild -project AirCard-iOS.xcodeproj -scheme AirCard-iOS \
             -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
             -only-testing:AirCard-iOSTests/MobileGestaltProbeTests \
+            -only-testing:AirCard-iOSTests/AirTrafficDiagnosticsTests \
             CODE_SIGNING_ALLOWED=NO test
       - name: Build unsigned IPA
         run: bash build-ipa.sh Release
       - uses: actions/upload-artifact@v4
         with:
-          name: AirCard-MobileGestalt-Probe
+          name: AirCard-Experimental-Diagnostics
           path: build/AirCard-iOS.ipa
           if-no-files-found: error
           retention-days: 14

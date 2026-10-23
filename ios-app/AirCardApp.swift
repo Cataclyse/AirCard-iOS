@@ -11,6 +11,7 @@ struct AirCardApp: App {
             guard let msg = msg else { return }
             let line = String(cString: msg)
             DispatchQueue.main.async {
+                AirTrafficDiagnosticsStore.shared.ingest(line)
                 AppViewModel.sharedLogSink?(line)
             }
         }, nil)

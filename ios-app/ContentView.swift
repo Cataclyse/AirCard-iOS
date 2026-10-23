@@ -855,7 +855,7 @@ struct ContentView: View {
                 .tabItem { Label("Wallpapers", systemImage: "photo.stack.fill") }
                 .tag(AppTab.wallpapers)
 
-            MobileGestaltProbeView()
+            ExperimentalView()
                 .tabItem { Label("Experimental", systemImage: "flask") }
                 .tag(AppTab.experimental)
         }

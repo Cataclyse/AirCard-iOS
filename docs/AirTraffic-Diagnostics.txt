@@ -1,0 +1,200 @@
+AIRTRAFFIC : ANALYSE DU CODE ET DIAGNOSTICS PASSIFS
+
+Contexte fourni : iPhone17,3, iOS 27.2 beta 2, 24B5089g.
+Le résultat ObjectNotFound du probe direct est fourni par l'utilisateur ;
+aucune opération sur appareil n'a été exécutée pendant ce travail.
+ObjectNotFound signifie ici : Path not visible in current AFC namespace.
+Il ne démontre ni l'absence du fichier système, ni sa visibilité par un autre service.
+
+1. CHAINE D'APPEL
+
+Wallet / passcode :
+  AppViewModel.flashCards / flashPassthm
+  -> al_exploit_write_dir (airlift.h / lib.rs)
+  -> exploit::write_dir (FFI, thread dédié, runtime existant)
+  -> exploit_write_dir
+  -> exploit_write_batch
+  -> en cas d'erreur : exploit_write_single_file, jusqu'à 3 essais par fichier.
+
+PosterBoard :
+  AppViewModel.flashSelectedTendies -> TendiesEngine.flashTendies
+  -> injectDescriptorFolder -> al_exploit_inject_folder
+  -> exploit::inject_folder -> exploit_inject_folder.
+  Les préférences passent par writeDirectoryTree -> al_exploit_write_dir.
+  InstallationProxy fournit le champ Container ; ce n'est pas une autorisation.
+
+Les wrappers *_inner ajoutés isolent uniquement le journal ; les corps et leurs
+Result, branches, messages, temporisations et requêtes existantes sont conservés.
+Les événements sont corrélés par operationId et parentId.
+
+2. DESTINATIONS EFFECTIVEMENT CONSTRUITES PAR L'INTERFACE
+
+Wallet :
+  /var/mobile/Library/Passes/Cards/<identifiant>.pkpass/<asset>
+  /var/mobile/Library/Passes/Cards/<identifiant>.cache/<cache-leaf>
+  /var/mobile/Library/Passes/Cards/<identifiant>.pkcache/<cache-leaf>
+  Les caches FrontFace, Preview et PlaceHolder sont invalidés en best effort.
+
+Passcode :
+  /var/mobile/Library/Caches/TelephonyUI-8/<asset>
+  /var/mobile/Library/Caches/TelephonyUI-9/<asset>
+  /var/mobile/Library/Caches/TelephonyUI-10/<asset>
+  L'interface choisit une version ou les trois.
+
+PosterBoard :
+  <container>/Library/Application Support/PRBPosterExtensionDataStore/
+    <version>/Extensions/<extension>/descriptors/<UUID>
+  version = 61 sur iOS 27 ; 59 pour les anciennes versions <= 16.
+  Certaines extensions ont une deuxième injection vers leur nom moderne.
+  <container>/Library/Preferences/com.apple.PosterBoard.unprotectedUserDefaults.plist
+  /var/mobile/Library/Preferences/com.apple.PosterBoard.unprotectedUserDefaults.plist
+  Une partie des opérations secondaires utilise try? : leur échec n'est pas fatal.
+
+Media, utilisé par le transport existant :
+  /var/mobile/Media/airlift-src-<token>/... : archive extraite
+  /var/mobile/Media/airlift-link-<token> : objet temporaire existant
+  /var/mobile/Media/Airlock/Book : traitement Books
+  Books/Sync/Books.plist dans le namespace AFC : manifeste temporaire existant.
+  Le diagnostic ne crée aucun fichier de contrôle ou nouvel objet dans Media.
+
+Ces chemins sont ceux utilisés par le code, PAS une matrice d'accès validée
+sur chaque build. Les writers Rust acceptent des chaînes de chemin sans whitelist
+générale : la capacité à fournir une chaîne ne constitue pas une preuve d'accès.
+Le filtre des journaux ne remplace pas une autorisation ou une validation de cible.
+
+3. FONCTIONS, PRECONDITIONS, CONTROLES ET ERREURS
+
+exploit_write_dir
+  Destination : fichiers immédiats de source_dir vers target_dir.
+  Préconditions : source locale lisible avec au moins un fichier non caché,
+    pairing lisible/valide, tunnel et AFC disponibles.
+  Contrôles : read_dir, path.is_file, lecture locale de chaque fichier.
+    Non récursif ; les erreurs d'entrées individuelles de read_dir sont filtrées
+    par flatten. Les noms cachés sont ignorés.
+    Lecture de sauvegarde de Books, puis batch et repli unitaire existant.
+  Erreurs : source vide/illisible, pairing, connexion, batch puis essais épuisés.
+  Limites : échec de lecture Books ramené à None ; plusieurs erreurs de restore
+    et close sont ignorées. Les événements AFC les rendent maintenant visibles.
+  Résultat : Ok signifie retour de la chaîne existante, pas vérification finale.
+
+exploit_write_single_file
+  Destination : target_dir/leaf ; un fichier par session.
+  Préconditions : tunnel/AFC déjà ouverts, payload local en mémoire.
+  Contrôles : construction locale archive/manifeste ; réception du flux ZIP ;
+    stat AFC de source, de l'objet lien déjà présent dans la primitive, du payload.
+    Attente ReadyForSync puis AssetManifest ; erreurs de transport propagées.
+  Erreurs : encodage/archive, service, IO ZIP, stat de staging, écriture Books,
+    IO/protocole ATC, ReadyForSync absent, AssetManifest absent.
+  Normalement : exploit_write_single_file_observed(..., None).
+    Les branches d'observation préalable Some ne sont pas activées par ce travail.
+  Résultat : envois FileComplete puis délai/nettoyage ; aucun readback final.
+
+exploit_write_batch
+  Destination : target_dir/<chaque leaf> ; session commune.
+  Préconditions : mêmes services, fichiers en mémoire ; une liste vide retourne Ok.
+  Contrôles : stat de source, du lien de staging et du PREMIER payload seulement.
+    Les autres payloads ne sont pas individuellement vérifiés par ce contrôle.
+    ReadyForSync et AssetManifest attendus avec boucles/temporisations bornées.
+  Erreurs : mêmes familles que le writer unitaire.
+  Limites : des SyncFailed sont traités comme notices non fatales par le code
+    existant. Le journal les signale comme error_message_received.
+  Résultat : pas d'atomicité démontrée malgré l'ancien texte 'atomic batch'.
+    Pas de comparaison des fichiers finaux ; repli possible après échec partiel.
+
+exploit_inject_folder
+  Destination : target_parent_dir/dest_name ; arbre payload complet.
+  Préconditions : folder_path est un répertoire local ; pairing/services valides.
+  Contrôles : parcours local récursif et archive, stat de source/lien/payload,
+    mêmes étapes Books et ATC que le writer unitaire.
+  Erreurs : répertoire absent, parcours/lecture/archive, puis services/IO/staging/ATC.
+  Limites : pas de validation du contenu complet de l'arbre distant final,
+    pas de précontrôle de droits de la cible ou de conflit avec une cible existante.
+  Résultat : retour déclaré de la séquence ; aucune preuve de contenu final.
+
+build_archive / build_archive_multi / build_folder_archive
+  Destination : aucune écriture distante ; production d'un ZIP en mémoire.
+  Le premier contient un payload, le deuxième N payloads, le troisième un arbre.
+  Les builders incluent déjà un lien symbolique et des entrées de répertoires.
+  Ils n'effectuent pas de stat distant, ne demandent pas d'autorisation et ne
+    prouvent pas que leur cible est accessible. Aucun builder n'est modifié ici.
+  build_folder_archive ignore les noms cachés et __MACOSX ; les erreurs locales
+    de parcours/lecture sont propagées. Il n'y a pas d'audit générique des chemins.
+  Erreurs : IO/ZIP/sérialisation et parcours local selon le builder.
+
+FileComplete / AirTraffic
+  Chemin : streaming_zip_conduit prépare les objets dans Media, AFC inspecte
+    le staging et écrit le manifeste Books, puis com.apple.atc reçoit les messages.
+  Services réels : shim RSD si publié, nom RSD nu sinon, ou repli Lockdown existant.
+  Messages : HostInfo, RequestingSync, FinishedSyncingMetadata puis FileComplete.
+  Contrôles : décodage plist, limite de taille du message ATC entrant, état ReadyForSync
+    et AssetManifest ; échanges ping/pong existants.
+  Le corps de réponse ZIP est reçu mais n'est pas décodé/validé comme un succès
+    applicatif. Le journal le nomme response_received_not_interpreted.
+  Un write/flush réseau réussi n'est pas un accusé de résultat filesystem.
+  Aucune lecture ATC supplémentaire et aucun nouveau message ne sont ajoutés.
+  Les boucles d'attente ATC sont bornées, mais toutes les IO AFC/ZIP n'ont pas
+    un timeout explicite. Une étape started sans résultat reste incomplète.
+
+4. VERIFICATION AVANT/APRES
+
+Avant : fichiers locaux, disponibilité des services, objets de staging Media.
+Pas de stat/lecture de la destination finale dans ces writers.
+Après : délai fixe puis nettoyage et restauration Books tentés.
+Pas de hash ou comparaison octet par octet de la destination finale.
+Plusieurs erreurs de nettoyage/restauration sont explicitement ignorées par le
+code existant : elles restent ignorées par le contrôle de flux, mais journalisées.
+Un retour Ok est rendu comme returned_ok_unverified, finalTargetVerified=false.
+
+Le canary séparé exploit_run possède une récupération/lecture comparative, mais
+elle déplace le témoin. Ce chemin n'est ni lancé ni étendu par ce diagnostic.
+Il ne constitue pas une lecture système non destructive d'un fichier arbitraire.
+
+5. ECRAN ET CODES BRUTS
+
+Experimental -> AirTraffic Diagnostics est un lecteur de logs passif.
+Il n'a aucun bouton d'injection, champ de destination ou appel FFI d'opération.
+Les logs proviennent des actions déjà disponibles dans les autres onglets.
+Le journal est limité aux 1500 événements récents ; toute perte est affichée.
+
+Codes :
+  AFC : vrais u64 des paquets Status, via l'observateur préexistant activé pour
+    ces opérations ; les codes inconnus ne sont pas réinterprétés.
+  IO de flux : raw_os_error lorsqu'il existe, sinon null et détail textuel.
+  ATC : champs d'erreur reçus, y compris imbriqués ; aucune invention de code.
+  Erreurs déjà converties en String : code indisponible, détail conservé.
+  Une réponse Data AFC réussie peut ne contenir aucun paquet Status : [] n'est
+    pas un code 0 supposé. null signifie indisponible, pas succès.
+  Les payloads, credentials et tokens Grappa ne sont pas ajoutés au journal structuré.
+
+6. CE QUE LE PROJET PERMET DE CONCLURE
+
+Il orchestre des injections vers les destinations construites par ses interfaces,
+avec staging Media et synchronisation Books/ATC. La lecture directe AFC est limitée
+au namespace du service connecté ; aucune autorité système globale n'en découle.
+Les succès visuels connus de Wallet/passcode/PosterBoard et un retour Rust Ok ne
+démontrent ni lecture, ni remplacement vérifié dans un SystemGroup arbitraire.
+Le test direct ObjectNotFound ne fournit aucune preuve de l'existence/absence
+du cache système ou de ses droits via un autre processus.
+
+Pour supporter conceptuellement une cible comme MobileGestalt, il manquerait :
+  - une visibilité autorisée de la vraie cible et une identité de chemin vérifiable ;
+  - une lecture non destructive et une sauvegarde intégrale vérifiée ;
+  - une capacité de remplacement autorisée du fichier existant ;
+  - une preuve de résultat, une relecture indépendante et une restauration fiable ;
+  - des garanties concernant droits, métadonnées, cohérence et consommation du cache.
+Ce sont des conditions manquantes, pas des méthodes proposées pour les obtenir.
+Aucun contournement, nouvelle destination, écriture SystemGroup ou modification AOD
+n'est implémenté ou testé par ce travail.
+
+7. ETAT DU CHECKOUT ET VALIDATION
+
+Le checkout initial contenait un diff non commité dans exploit.rs, avec une
+référence à airtraffic_reachability.rs absent. Ce diff est conservé dans
+build/airtraffic-diagnostics/preexisting-exploit.patch pour revue locale.
+Le fichier manquant est fourni uniquement comme type Observation et fonction
+de journalisation compatible ; aucun point d'entrée d'opération n'y est ajouté.
+
+Les vérifications locales portent sur syntaxe, invariants et configuration.
+Les tests Rust/macOS et Swift/simulateur sont inclus dans GitHub Actions.
+Ils ne démontrent pas la portée des services sur l'iPhone.
+AirTraffic-Diagnostics-example.jsonl est un exemple synthétique, pas une mesure.
