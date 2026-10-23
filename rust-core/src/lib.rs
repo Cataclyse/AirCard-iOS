@@ -22,6 +22,51 @@ extern crate idevice_ffi;
 
 pub use pairing::{ALPairPinCb, ALPairReadyCb, ALPairResult};
 
+/// Read-only AFC diagnostic. Returns 0 when a structured report was produced,
+/// including access failures; 1 on an internal failure, 2 on invalid arguments.
+/// The report contains bytesHex only after a complete read; never log that field.
+/// Free both returned strings with al_string_free(). Blocks off the UI thread.
+///
+/// # Safety
+/// Input strings must be valid C strings; output pointers must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn al_mobilegestalt_probe(
+    pairing_path: *const c_char,
+    log_cb: exploit::ALLogCallback,
+    ctx: *mut c_void,
+    out_json: *mut *mut c_char,
+    out_error: *mut *mut c_char,
+) -> i32 {
+    if !out_json.is_null() {
+        *out_json = std::ptr::null_mut();
+    }
+    if !out_error.is_null() {
+        *out_error = std::ptr::null_mut();
+    }
+    if pairing_path.is_null() || out_json.is_null() {
+        return 2;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        exploit::mobilegestalt_probe::run(pairing_path, log_cb, ctx)
+    }));
+    match result {
+        Ok(Ok(json)) => {
+            *out_json = ffi_util::cstr(json);
+            0
+        }
+        other => {
+            let message = match other {
+                Ok(Err(error)) => error,
+                _ => "internal_error: Rust panic in al_mobilegestalt_probe".to_string(),
+            };
+            if !out_error.is_null() {
+                *out_error = ffi_util::cstr(message);
+            }
+            1
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Logging
 // ---------------------------------------------------------------------------

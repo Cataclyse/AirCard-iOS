@@ -33,6 +33,8 @@ pub struct AfcClient {
     /// The underlying iDevice connection
     pub idevice: Idevice,
     package_number: u64,
+    // Opt-in diagnostics; normal clients keep the same status handling.
+    status_observer: Option<std::sync::Arc<std::sync::Mutex<Vec<u64>>>>,
 }
 
 /// Information about a file on the device
@@ -76,11 +78,21 @@ impl IdeviceService for AfcClient {
         Ok(Self {
             idevice,
             package_number: 0,
+            status_observer: None,
         })
     }
 }
 
 impl AfcClient {
+    /// Observe the exact u64 values in AFC Status packets before enum conversion.
+    /// Only the diagnostic client opts in; data responses have no Status code.
+    pub fn observe_status_codes(
+        &mut self,
+        observer: std::sync::Arc<std::sync::Mutex<Vec<u64>>>,
+    ) {
+        self.status_observer = Some(observer);
+    }
+
     /// Creates a new AFC client from an existing iDevice connection
     ///
     /// # Arguments
@@ -89,6 +101,7 @@ impl AfcClient {
         Self {
             idevice,
             package_number: 0,
+            status_observer: None,
         }
     }
 
@@ -584,6 +597,11 @@ impl AfcClient {
                 ));
             }
             let code = u64::from_le_bytes(res.header_payload[..8].try_into().unwrap());
+            if let Some(observer) = &self.status_observer {
+                if let Ok(mut codes) = observer.lock() {
+                    codes.push(code);
+                }
+            }
             let e = AfcError::from(code);
             if e == AfcError::Success {
                 return Ok(res);

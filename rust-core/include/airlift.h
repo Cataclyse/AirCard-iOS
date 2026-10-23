@@ -75,6 +75,17 @@ void al_pairing_result_free(ALPairResult *r);
 // Exploit
 // ---------------------------------------------------------------------------
 
+// Read-only MobileGestalt AFC probe, with no remote writes or file moves.
+// BLOCKS: run off the UI thread. out_json is required; free both outputs with
+// al_string_free(). 0 means report available (inspect individual stage statuses),
+// 1 internal failure, 2 invalid arguments. bytesHex is private file content,
+// present only after a complete read; do not include it in diagnostic logs.
+int32_t al_mobilegestalt_probe(const char *pairing_path,
+                              ALLogCallback log_cb,
+                              void *ctx,
+                              char **out_json,
+                              char **out_error);
+
 // Run the AirTraffic sandbox escape. BLOCKS — run off the main thread.
 // `pairing_path` — path produced by al_pairing_run_host.
 // `target`       — absolute iOS directory (e.g. "/var/mobile/Library/SpringBoard").

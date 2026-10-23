@@ -1,0 +1,55 @@
+name: Build MobileGestalt Probe IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [mobilegestalt-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select installed Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+          xcodebuild -version
+      - name: Install Rust and XcodeGen
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo >/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+      - name: Test Rust diagnostics
+        run: cargo test --locked --manifest-path rust-core/Cargo.toml --lib mobilegestalt_probe
+      - name: Rebuild AirliftFFI from source
+        run: bash build-ios.sh
+      - name: Generate Xcode project
+        run: xcodegen generate
+      - name: Test backup and report handling on simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          SIMULATOR_ID=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for devices in d["devices"].values() for v in devices if "iPhone" in v["name"]))')
+          xcodebuild -project AirCard-iOS.xcodeproj -scheme AirCard-iOS \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_ID" \
+            -only-testing:AirCard-iOSTests/MobileGestaltProbeTests \
+            CODE_SIGNING_ALLOWED=NO test
+      - name: Build unsigned IPA
+        run: bash build-ipa.sh Release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AirCard-MobileGestalt-Probe
+          path: build/AirCard-iOS.ipa
+          if-no-files-found: error
+          retention-days: 14

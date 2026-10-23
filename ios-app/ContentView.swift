@@ -854,6 +854,10 @@ struct ContentView: View {
             TendiesView()
                 .tabItem { Label("Wallpapers", systemImage: "photo.stack.fill") }
                 .tag(AppTab.wallpapers)
+
+            MobileGestaltProbeView()
+                .tabItem { Label("Experimental", systemImage: "flask") }
+                .tag(AppTab.experimental)
         }
         .alert("Notice", isPresented: Binding(
             get: { vm.errorMessage != nil },
