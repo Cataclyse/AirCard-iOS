@@ -10,9 +10,27 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-15
+    runs-on: macos-latest
     timeout-minutes: 60
     steps:
+      - name: Show runner environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          swift --version
+          if command -v rustc >/dev/null; then
+            rustc --version
+          else
+            echo "rustc: not installed yet; see Install Rust and XcodeGen"
+          fi
+          if command -v cargo >/dev/null; then
+            cargo --version
+          else
+            echo "cargo: not installed yet; see Install Rust and XcodeGen"
+          fi
       - uses: actions/checkout@v4
       - name: Select installed Xcode
         shell: bash
