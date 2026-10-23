@@ -127,7 +127,7 @@ jobs:
               assert lib.get('SupportedPlatformVariant') == expected_variant
               base = root / lib['LibraryIdentifier']
               archive = base / lib['LibraryPath']
-              subprocess.run(['xcrun', 'lipo', '-verify_arch', 'arm64', str(archive)], check=True)
+              subprocess.run(['xcrun', 'lipo', str(archive), '-verify_arch', 'arm64'], check=True)
               assert subprocess.check_output(['xcrun', 'ar', '-t', str(archive)]).strip(), 'Empty archive'
               for header in Path('rust-core/include').rglob('*'):
                   if header.is_file():
