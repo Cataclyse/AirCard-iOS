@@ -1,0 +1,167 @@
+Analyse et verification Wallet AirTraffic
+=======================================
+
+Perimetre
+---------
+iPhone17,3, iOS 27.2 beta 2, build 24B5089g. Analyse des 220 evenements
+AIRTRAFFIC_DIAGNOSTIC fournis. Aucun changement de destination, de permissions,
+de protocole d'injection ou de logique MobileGestalt. Workflow conserve tel quel.
+
+Resultats des logs fournis
+-------------------------
+Operation racine / tentative    Destination    Payloads    FileComplete envoyes
+atd-1 / atd-2                   *.pkpass        11          12
+atd-3 / atd-4                   *.cache          3           4
+atd-5 / atd-6                   *.pkcache        3           4
+
+Les destinations sont les dossiers Wallet deja utilises sous
+/var/mobile/Library/Passes/Cards/<identifiant>.<extension>.
+Le FileComplete supplementaire concerne l'element de liaison du pipeline
+existant ; il ne constitue pas un payload d'image supplementaire.
+
+Chaque tentative recoit ReadyForSync et AssetManifest. Chaque envoi
+FileComplete a un evenement started puis stream_write_completed. Les racines
+et leurs tentatives retournent returned_ok_unverified. Chaque racine regroupe
+trois nettoyages AFC retournes success : deux dans la tentative et un concernant
+Books/Sync/Books.plist dans le wrapper. Aucun stat apres nettoyage n'est present.
+
+Les trois reponses ZIP brutes se decodent en plist contenant
+Status=DataComplete. Il s'agit d'un acquittement du staging par
+com.apple.streaming_zip_conduit, pas d'une relecture des fichiers Wallet.
+Les trois staging_stat concernent le dossier de staging, son element de liaison
+et le premier payload seulement. Ils ne verifient pas tous les payloads et ne
+constituent pas une preuve d'identite ou de contenu du chemin systeme final.
+
+Les trois erreurs AFC 8 sur l'ouverture initiale de Books/Sync/Books.plist
+signifient que ce chemin n'est pas visible dans ce namespace AFC a cet instant.
+Le writer existant continue sans manifeste Books preexistant. Ce ne sont ni une
+preuve d'echec Wallet, ni une preuve d'absence d'un fichier systeme.
+
+Pour chaque racine des logs fournis :
+AirTraffic protocol: SUCCESS (protocol_completed)
+Writer returned: OK
+Final target verification: UNVERIFIED (destination_unverifiable)
+
+Ce que les preuves permettent de conclure
+----------------------------------------
+protocol_completed : reponse ZIP DataComplete, ReadyForSync, AssetManifest,
+nombre attendu de FileComplete effectivement envoyes, pas d'erreur observee,
+historique complet. Cela signifie fin des echanges instrumentes du pipeline
+existant ; aucun nouvel acquittement de destination n'est invente.
+
+destination_verified : relecture independante exacte de TOUS les payloads du
+manifeste attendu, via le filesystem normal de l'application, avec controle du
+chemin ouvert, fichier regulier, identite stable, taille et SHA-256 identiques.
+Il s'agit d'un etat des octets observe a l'heure indiquee : cela ne demontre pas
+que cette injection a cause le changement, ni que Wallet affiche ces octets.
+
+destination_effect_observed : l'utilisateur declare explicitement avoir vu le
+NOUVEAU visuel attendu sur cette carte precise dans Wallet apres l'operation.
+Source enregistree : user_visual_confirmation. Ce n'est pas une validation
+automatique des octets. Ce constat ne valide pas les dossiers .cache/.pkcache.
+
+destination_unverifiable : pas de preuve suffisante, manifeste absent, erreur
+de lecture/permission/identite/stabilite, ou operation non encore verifiee.
+Une erreur de protocole ne prouve pas a elle seule l'echec du contenu final.
+
+destination_verification_failed : une relecture independante stable a trouve
+une taille ou un SHA-256 different du payload attendu. FAILED ne remplace pas
+un refus de lecture, qui reste UNVERIFIED avec son errno brut.
+
+La presence d'une carte, les messages PDCardFileManager/PDPassLibrary du scanner
+syslog existant, les succes de staging, FileComplete et Ok ne permettent pas de
+verifier les nouveaux octets. Les messages du scanner ne sont pas correles a
+l'operation et ne contiennent pas de comparaison de contenu. Ils ne sont donc
+pas promus automatiquement en preuve d'effet ni de verification.
+
+Les messages optimistes deja presents dans AppViewModel (Skins applied,
+Pass cache invalidated) et le compteur de succes de l'ecran Wallet ne sont pas
+une preuve independante. Les retours des operations de cache y sont ignores.
+Cette etape conserve ce comportement existant ; la synthese diagnostique expose
+separement les retours reels de chaque operation et la preuve disponible.
+
+Implementation
+--------------
+rust-core/src/airtraffic_diagnostics.rs : manifeste de taille et SHA-256 des
+octets deja en memoire. Aucun nouvel acces au device.
+rust-core/src/exploit.rs : trois appels de journalisation uniquement (wrapper
+directory, single, batch). L'ordre et les resultats des appels device existants
+restent inchanges ; aucun writer ne verifie automatiquement sa destination.
+ios-app/AirTrafficOperationSummary.swift : agregation parent/tentatives par
+operationId ; pas de double comptage des payloads ; controle separe de chaque
+tentative ; decodage passif de la reponse ZIP deja journalisee ; verificateur
+Wallet normal strictement en lecture seule, sans AFC ni demande de permission.
+ios-app/AirTrafficDiagnosticsView.swift : syntheses, preuves horodatees, errno
+bruts, relecture sur demande et attestation visuelle explicite. Les evenements
+JSON bruts sont conserves dans le partage. Le flag historique du writer ne
+sert jamais de preuve independante. Les sous-operations gardent leur propre
+statut ; une preuve sur la racine n'est pas appliquee automatiquement aux enfants.
+tests/AirTrafficDiagnosticsTests.swift : cas nominaux, comptage parent/enfant,
+historique tronque, tentatives incompletes, erreurs ATC, nettoyage ignore,
+flag historique insuffisant, validation du perimetre de lecture et attestation.
+
+Le verificateur ne lit que les noms d'assets Wallet deja presents dans AirCard,
+dans la derniere operation racine terminee pour cette destination. Un nouveau
+run est necessaire pour enregistrer les SHA-256 attendus. Les anciennes traces
+restent utiles pour la synthese de protocole mais ne permettent pas un readback
+cryptographique retroactif. Aucun acces AFC de substitution n'est tente : une
+lecture AFC via un namespace de staging ne suffit pas a identifier le vrai
+fichier Wallet. L'application normale peut se voir refuser la lecture Wallet ;
+ce resultat est attendu comme possibilite et ne declenche aucune autre methode.
+
+Le verificateur n'ecrit rien : open O_RDONLY|O_CLOEXEC|O_NOFOLLOW, F_GETPATH,
+fstat, read, fstat et lstat. Fichiers limites a 32 MiB et manifeste a 128 MiB.
+Un changement de fichier pendant la lecture rend la verification non concluante.
+Les octets lus ne sont pas exportes ; seules les tailles et empreintes le sont.
+
+Validation et construction
+--------------------------
+Depuis macOS, les commandes existantes restent :
+  cargo test --locked --manifest-path rust-core/Cargo.toml --lib
+  bash build-ios.sh
+  xcodegen generate
+  xcodebuild -project AirCard-iOS.xcodeproj -scheme AirCard-iOS \
+    -destination 'platform=iOS Simulator,name=<simulateur disponible>' \
+    -only-testing:AirCard-iOSTests/AirTrafficDiagnosticsTests \
+    -only-testing:AirCard-iOSTests/MobileGestaltProbeTests \
+    CODE_SIGNING_ALLOWED=NO test
+  bash build-ipa.sh Release
+
+Le workflow .github/workflows/mobilegestalt-probe.yml existant contient deja
+ces tests et la construction de l'IPA. Il reste inchange par cette etape.
+Sur GitHub, lancer ce workflow sur la branche contenant ces changements.
+Le changement Rust invalide normalement son cache XCFramework existant.
+
+Validation locale Windows : rustfmt et git diff --check disponibles. Tests Rust
+non executes jusqu'au bout : hex absent du cache Cargo, environnement hors ligne.
+Tests Swift et construction iOS non executes : Swift/Xcode indisponibles.
+Ces limitations ne constituent pas des resultats de test sur l'iPhone.
+
+Test utilisateur sur l'iPhone
+----------------------------
+1. Effectuer une operation Wallet habituelle sur une carte de test.
+2. Ouvrir Experimental > AirTraffic Diagnostics. Relever la racine, son enfant,
+   destination, compte de payloads, FileComplete, ZIP, ATC et nettoyage.
+3. Apres la fin de l'operation, utiliser Read back existing Wallet payloads.
+   Si la lecture normale est refusee, conserver UNVERIFIED et le rawErrno ;
+   ne tenter aucune autre methode. VERIFIED exige tous les payloads identiques.
+4. Ouvrir la carte dans Wallet. Si le nouveau visuel attendu est effectivement
+   visible, enregistrer cette observation via la confirmation explicite .pkpass.
+   Une lecture deja FAILED ne peut pas etre remplacee par une attestation visuelle.
+5. Partager Share diagnostic log : syntheses par operationId, preuves horodatees,
+   statuts finals et JSON brut. Renvoyer aussi modele/build et indiquer ce qui est
+   reellement visible dans Wallet. Masquer les identifiants personnels si besoin.
+
+Exemple de resume, sans preuve independante :
+Operation: atd-1
+Destination: /var/mobile/Library/Passes/Cards/<identifiant>.pkpass
+Payloads: 11
+Streaming ZIP: DataComplete (staging only); AFC staging stats: 3 success; STAGING OBSERVED
+ATC result: ReadyForSync + AssetManifest + expected FileComplete sends; no destination acknowledgement
+FileComplete sent: 12
+Cleanup: 3 success / 0 errors / 0 pending; no post-cleanup stat
+AirTraffic protocol: SUCCESS (protocol_completed)
+Writer returned: OK
+Final target verification: UNVERIFIED (destination_unverifiable)
+Attempts: atd-2
+History complete: true

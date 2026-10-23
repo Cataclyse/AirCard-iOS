@@ -12,6 +12,8 @@ jobs:
   build:
     runs-on: macos-latest
     timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/rust-core/target
     steps:
       - name: Show runner environment
         shell: bash
@@ -48,12 +50,131 @@ jobs:
           fi
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           brew list xcodegen >/dev/null 2>&1 || brew install xcodegen
+      - name: Compute source and toolchain cache keys
+        id: cache-keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          def run(*args):
+              return subprocess.check_output(args).decode().strip()
+          files = sorted(p for p in run('git', 'ls-files', '-z', '--', 'rust-core', 'build-ios.sh', '.cargo', 'rust-toolchain', 'rust-toolchain.toml', '.github/workflows/mobilegestalt-probe.yml').split('\0') if p)
+          sources = hashlib.sha256()
+          for name in files:
+              sources.update(name.encode() + b'\0' + Path(name).read_bytes() + b'\0')
+          commands = [('sw_vers',), ('uname', '-m'), ('rustc', '-vV'), ('cargo', '-V'),
+                      ('xcodebuild', '-version'), ('xcrun', 'clang', '--version'),
+                      ('xcrun', '--sdk', 'macosx', '--show-sdk-build-version'),
+                      ('xcrun', '--sdk', 'iphoneos', '--show-sdk-build-version'),
+                      ('xcrun', '--sdk', 'iphonesimulator', '--show-sdk-build-version')]
+          tools = {str(cmd): run(*cmd) for cmd in commands}
+          tools['ImageVersion'] = os.environ.get('ImageVersion', '')
+          tools['buildEnvironment'] = {k: v for k, v in os.environ.items() if k.startswith(
+              ('CARGO_', 'RUST', 'CC', 'CXX', 'AR', 'RANLIB', 'CFLAGS', 'TARGET_', 'SDKROOT', 'IPHONEOS_', 'MACOSX_', 'DEVELOPER_DIR'))}
+          toolchain = hashlib.sha256(json.dumps(tools, sort_keys=True).encode()).hexdigest()
+          lock = hashlib.sha256(Path('rust-core/Cargo.lock').read_bytes()).hexdigest()
+          identity = f"{os.environ['RUNNER_OS']}-{os.environ['RUNNER_ARCH']}-{toolchain}-{lock}-{sources.hexdigest()}"
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'cargo-key=cargo-v1-{identity}\nxcframework-key=xcframework-v1-{identity}\n')
+          PY
+      # Exact keys only: changed Rust inputs never restore an older target tree.
+      - name: Cache Cargo downloads and build artifacts
+        id: cargo-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust-core/target
+          key: ${{ steps.cache-keys.outputs.cargo-key }}
+      - name: Cache AirliftFFI XCFramework
+        id: xcframework-cache
+        uses: actions/cache@v4
+        with:
+          path: AirliftFFI.xcframework
+          key: ${{ steps.cache-keys.outputs.xcframework-key }}
+      - name: Validate restored XCFramework and report cache status
+        id: framework
+        shell: bash
+        env:
+          CARGO_CACHE_HIT: ${{ steps.cargo-cache.outputs.cache-hit }}
+          XCFRAMEWORK_CACHE_HIT: ${{ steps.xcframework-cache.outputs.cache-hit }}
+          XCFRAMEWORK_CACHE_KEY: ${{ steps.cache-keys.outputs.xcframework-key }}
+        run: |
+          set -euo pipefail
+          cat > "$RUNNER_TEMP/validate-xcframework.py" <<'PY'
+          import hashlib, json, os, plistlib, subprocess, sys
+          from pathlib import Path
+          root = Path('AirliftFFI.xcframework')
+          manifest = root / '.cache-integrity.json'
+          assert root.is_dir() and not root.is_symlink(), 'XCFramework missing or symlinked'
+          assert not any(p.is_symlink() for p in root.rglob('*')), 'Unexpected symlink'
+          hashes = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(root.rglob('*')) if p.is_file() and p != manifest}
+          if sys.argv[1] == 'check':
+              saved = json.loads(manifest.read_text())
+              assert saved['key'] == os.environ['XCFRAMEWORK_CACHE_KEY'], 'Wrong cache identity'
+              assert saved['files'] == hashes, 'Missing, extra or corrupted cached files'
+          info = plistlib.loads((root / 'Info.plist').read_bytes())
+          libraries = info['AvailableLibraries']
+          assert len(libraries) == 2, 'Expected device and simulator slices'
+          assert {lib['LibraryIdentifier'] for lib in libraries} == {'ios-arm64', 'ios-arm64-simulator'}
+          for lib in libraries:
+              assert lib['SupportedPlatform'] == 'ios' and lib['SupportedArchitectures'] == ['arm64']
+              expected_variant = 'simulator' if lib['LibraryIdentifier'].endswith('-simulator') else None
+              assert lib.get('SupportedPlatformVariant') == expected_variant
+              base = root / lib['LibraryIdentifier']
+              archive = base / lib['LibraryPath']
+              subprocess.run(['xcrun', 'lipo', '-verify_arch', 'arm64', str(archive)], check=True)
+              assert subprocess.check_output(['xcrun', 'ar', '-t', str(archive)]).strip(), 'Empty archive'
+              for header in Path('rust-core/include').rglob('*'):
+                  if header.is_file():
+                      cached = base / lib['HeadersPath'] / header.relative_to('rust-core/include')
+                      assert cached.read_bytes() == header.read_bytes(), f'Stale header: {header}'
+          if sys.argv[1] == 'seal':
+              manifest.write_text(json.dumps({'key': os.environ['XCFRAMEWORK_CACHE_KEY'], 'files': hashes}, sort_keys=True))
+          print('XCFramework integrity: verified')
+          PY
+          if [[ "$CARGO_CACHE_HIT" == true ]]; then
+            echo "Cargo cache: HIT"
+          else
+            echo "Cargo cache: MISS"
+            cargo clean --manifest-path rust-core/Cargo.toml
+          fi
+          valid=false
+          if [[ "$XCFRAMEWORK_CACHE_HIT" == true ]]; then
+            echo "XCFramework cache: HIT"
+            if python3 "$RUNNER_TEMP/validate-xcframework.py" check; then
+              valid=true
+            else
+              echo "::warning::Cached XCFramework rejected; rebuilding from clean Rust artifacts. Delete the invalid cache entry to replace it on a later run."
+              cargo clean --manifest-path rust-core/Cargo.toml
+            fi
+          else
+            echo "XCFramework cache: MISS"
+          fi
+          echo "valid=$valid" >> "$GITHUB_OUTPUT"
+          if [[ "$valid" == true ]]; then
+            echo "Rebuilding AirliftFFI: no"
+          else
+            echo "Rebuilding AirliftFFI: yes"
+          fi
       - name: Test Rust diagnostics
         run: |
-          cargo test --locked --manifest-path rust-core/Cargo.toml --lib mobilegestalt_probe
-          cargo test --locked --manifest-path rust-core/Cargo.toml --lib airtraffic_diagnostics
+          cargo test --locked --manifest-path rust-core/Cargo.toml --lib
       - name: Rebuild AirliftFFI from source
-        run: bash build-ios.sh
+        if: steps.framework.outputs.valid != 'true'
+        shell: bash
+        env:
+          XCFRAMEWORK_CACHE_KEY: ${{ steps.cache-keys.outputs.xcframework-key }}
+        run: |
+          set -euo pipefail
+          bash build-ios.sh
+          python3 "$RUNNER_TEMP/validate-xcframework.py" seal
+      - name: Check dependency lockfile is unchanged
+        run: git diff --exit-code -- rust-core/Cargo.lock
       - name: Generate Xcode project
         run: xcodegen generate
       - name: Test backup and report handling on simulator

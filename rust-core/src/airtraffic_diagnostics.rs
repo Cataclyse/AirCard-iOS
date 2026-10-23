@@ -161,6 +161,21 @@ pub(super) fn staging(source: &str, destination: &str, archive_len: usize) {
     );
 }
 
+/// Hash the bytes already supplied to a writer. No filesystem/device operation.
+pub(super) fn payload_manifest(destination: &str, files: &[(&str, &[u8])]) {
+    use sha2::{Digest, Sha256};
+    record(
+        "payload_manifest",
+        "expected_bytes_recorded",
+        json!({
+            "payloads": files.iter().map(|(name, bytes)| json!({
+                "path": format!("{destination}/{name}"), "size": bytes.len(),
+                "sha256": hex::encode(Sha256::digest(bytes))
+            })).collect::<Vec<_>>()
+        }),
+    );
+}
+
 pub(super) fn atc_received(dict: &plist::Dictionary) {
     let mut errors = Vec::new();
     collect_errors(dict, "", &mut errors);
